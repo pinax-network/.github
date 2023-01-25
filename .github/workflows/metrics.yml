@@ -19,7 +19,7 @@ jobs:
         # token: ${{ secrets.METRICS_TOKEN }}
         base: header, activity, community, repositories, metadata
         base_indepth: yes
-        plugin_languages_ignored: html, css, dockerfile, shell, javascript
+        plugin_languages_ignored: html, css, dockerfile, shell, javascript, makefile
         plugin_followup: yes
         plugin_followup_sections: repositories
         plugin_languages: yes
