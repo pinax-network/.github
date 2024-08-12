@@ -225,9 +225,9 @@
                         <rect x="0" y="0" width="460" height="8" fill="white" rx="5"/>
                     </mask>
                     <rect mask="url(#languages-bar)" x="0" y="0" width="0" height="8" fill="#d1d5da"/>
-                    <rect mask="url(#languages-bar)" x="0" y="0" width="251.22229967736166" height="8" fill="#3178c6"/>
-                    <rect mask="url(#languages-bar)" x="251.22229967736166" y="0" width="113.63575795337475" height="8" fill="#dea584"/>
-                    <rect mask="url(#languages-bar)" x="364.8580576307364" y="0" width="95.1419423692636" height="8" fill="#00ADD8"/>
+                    <rect mask="url(#languages-bar)" x="0" y="0" width="251.19951984909542" height="8" fill="#3178c6"/>
+                    <rect mask="url(#languages-bar)" x="251.19951984909542" y="0" width="113.66716487052149" height="8" fill="#dea584"/>
+                    <rect mask="url(#languages-bar)" x="364.8666847196169" y="0" width="95.13331528038309" height="8" fill="#00ADD8"/>
                 </svg>
                 <div class="field center horizontal-wrap fill-width">
                     <div class="field center no-wrap language">
@@ -291,7 +291,7 @@
                 </div>
             </section>
             <footer>
-                <span>Last updated 11 Aug 2024, 00:21:12  with lowlighter/metrics@3.34.0</span>
+                <span>Last updated 12 Aug 2024, 00:20:06  with lowlighter/metrics@3.34.0</span>
             </footer>
         </div>
         <div xmlns="http://www.w3.org/1999/xhtml" id="metrics-end"></div>
