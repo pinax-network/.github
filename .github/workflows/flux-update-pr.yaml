@@ -107,7 +107,10 @@ jobs:
               }
               return out.map((c) => ({ heading: c.heading, text: c.text.join('\n').trim() })).filter((c) => c.text);
             };
-            const notesClient = process.env.RELEASE_NOTES_TOKEN ? getOctokit(process.env.RELEASE_NOTES_TOKEN) : github;
+            // Same Octokit class (with paginate/rest plugins) as `github`, authenticated with the notes token.
+            const notesClient = process.env.RELEASE_NOTES_TOKEN
+              ? new github.constructor({ auth: process.env.RELEASE_NOTES_TOKEN })
+              : github;
 
             // ---- 1. What did Flux change? Pair removed/added lines that carry a $imagepolicy marker.
 
