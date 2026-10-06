@@ -114,4 +114,4 @@ different reviewers; Flux batches every change under its `update.path` into one 
 ## Development
 
 The logic is in `index.js` (GitHub API, git, helm) and `lib.js` (pure functions). Run the tests
-with `node --test actions/flux-update-pr/`.
+with `node --test 'actions/**/*.test.js'`.

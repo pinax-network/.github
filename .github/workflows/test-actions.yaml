@@ -18,4 +18,4 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: node --test actions/
+      - run: node --test 'actions/**/*.test.js'
