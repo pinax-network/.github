@@ -1,5 +1,7 @@
 // Entry point, run by actions/github-script from action.yml with its github, context and core.
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { execFileSync } = require('child_process');
 const lib = require('./lib');
 
@@ -16,51 +18,51 @@ function appVersion(comp, tag) {
   return m[1];
 }
 
-// An AI summary of the release notes, or null when summarizing is off or fails for any reason; the
-// PR then quotes the deploy notes in its Before merging section instead.
-async function summarize(entries, core) {
+// An AI summary of the release notes by the Copilot CLI, or null when summarizing is off or fails for
+// any reason; the PR then quotes the deploy notes in its Before merging section instead.
+//
+// The CLI runs non-interactively with no tool pre-approved, so every tool call is denied: the release
+// notes are untrusted input and the summary needs nothing but the prompt. It runs in an empty
+// directory without custom instructions or MCP servers, so it sees only what is passed in.
+function summarize(entries, core) {
   if (process.env.SUMMARIZE !== 'true') return null;
-  const model = process.env.MODEL;
   const input = lib.summaryInput(entries, { maxChars: Number(process.env.SUMMARY_MAX_INPUT_CHARS) || undefined });
   if (!input) {
     core.info('No release notes to summarize, or too long even as deploy notes; using Before merging.');
     return null;
   }
+  const model = process.env.MODEL || '';
+  const args = [
+    '-p',
+    `${lib.SUMMARY_SYSTEM_PROMPT}\n\n<release-notes>\n${input}\n</release-notes>`,
+    '-s',
+    '--no-custom-instructions',
+    '--disable-builtin-mcps',
+    '--no-ask-user',
+    '--no-auto-update',
+    ...(model ? ['--model', model] : []),
+  ];
+  // The CLI reads COPILOT_GITHUB_TOKEN, GH_TOKEN, then GITHUB_TOKEN; pass only the one meant for it.
+  const env = { ...process.env, GITHUB_TOKEN: process.env.COPILOT_TOKEN };
+  delete env.COPILOT_GITHUB_TOKEN;
+  delete env.GH_TOKEN;
+  delete env.COPILOT_TOKEN;
   try {
-    const res = await fetch(process.env.MODELS_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${process.env.MODELS_TOKEN}`,
-        'content-type': 'application/json',
-        accept: 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        max_tokens: 1500,
-        messages: [
-          { role: 'system', content: lib.SUMMARY_SYSTEM_PROMPT },
-          { role: 'user', content: input },
-        ],
-      }),
-      signal: AbortSignal.timeout(90_000),
-    });
-    const raw = await res.text();
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${raw.slice(0, 300)}`);
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      throw new Error(`response is not JSON: ${raw.slice(0, 200)}`);
-    }
-    const choice = data.choices?.[0];
-    let text = lib.sanitizeSummary(choice?.message?.content);
-    if (!text) throw new Error('empty completion');
-    if (choice.finish_reason === 'length') text += '\n\n_Summary cut off at the output limit._';
-    core.info(`AI summary by ${model}: ${data.usage?.prompt_tokens ?? '?'} prompt / ${data.usage?.completion_tokens ?? '?'} completion tokens`);
-    return { text, model };
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'flux-update-pr-'));
+    const out = execFileSync('copilot', args, { cwd, env, encoding: 'utf8', timeout: 180_000, maxBuffer: 16 << 20, stdio: ['ignore', 'pipe', 'pipe'] });
+    const text = lib.sanitizeSummary(out);
+    if (!text) throw new Error('empty answer');
+    core.info(`AI summary by Copilot CLI${model ? ` (${model})` : ''}: ${text.length} characters`);
+    return { text, model: model ? `Copilot CLI, ${model}` : 'Copilot CLI' };
   } catch (err) {
-    core.warning(`AI summary failed, using Before merging instead: ${err.message}`);
+    const detail = (err.stderr || err.stdout || '').toString().trim().split('\n').slice(0, 3).join(' ');
+    // err.message repeats the whole command line, prompt included; report how it ended instead.
+    const reason =
+      err.code === 'ENOENT' ? 'copilot CLI not installed'
+      : err.signal ? `copilot CLI stopped by ${err.signal}${err.signal === 'SIGTERM' ? ' (timeout)' : ''}`
+      : err.status != null ? `copilot CLI exited with ${err.status}`
+      : err.message;
+    core.warning(`AI summary failed, using Before merging instead: ${reason}${detail ? `: ${detail}` : ''}`);
     return null;
   }
 }
@@ -158,7 +160,7 @@ module.exports = async ({ github, context, core }) => {
   let pr = open[0];
   // Leave room for what people wrote around the managed block, plus some slack.
   const kept = pr ? lib.mergeBody(pr.body, '').length : 0;
-  const summary = await summarize(entries, core);
+  const summary = summarize(entries, core);
   const managed = lib.renderBody(entries, { head, summary, bodyLimit: Math.max(5000, lib.MAX_BODY - kept - 1000) });
   if (pr) {
     ({ data: pr } = await github.rest.pulls.update({ owner, repo, pull_number: pr.number, title, body: lib.mergeBody(pr.body, managed) }));

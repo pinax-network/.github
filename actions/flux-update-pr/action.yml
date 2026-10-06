@@ -20,21 +20,20 @@ inputs:
     default: ""
   summarize:
     description: >-
-      Summarize the release notes with GitHub Models into a verdict and action items. The summary
+      Summarize the release notes with the Copilot CLI into a verdict and action items. The summary
       replaces the Before merging section, which stays the fallback when this is off or the call
-      fails. The calling job needs `permissions: models: read`.
+      fails. Needs `permissions: copilot-requests: write` on the calling job and the org policy
+      "Allow use of Copilot CLI billed to the organization"; usage is billed to the organization.
     default: "false"
   model:
-    description: GitHub Models model ID used when summarize is on.
-    default: openai/gpt-4.1
-  models-token:
-    description: Token for the GitHub Models API.
+    description: Copilot model for the summary; empty uses the Copilot CLI default.
+    default: ""
+  copilot-token:
+    description: Token the Copilot CLI authenticates with.
     default: ${{ github.token }}
-  models-endpoint:
-    description: >-
-      Chat completions endpoint. Use https://models.github.ai/orgs/<org>/inference/chat/completions to
-      bill usage to the organization.
-    default: https://models.github.ai/inference/chat/completions
+  copilot-version:
+    description: Version of the @github/copilot npm package to install.
+    default: "1"
   summary-max-input-chars:
     description: Largest release-notes input sent to the model; beyond it only deploy sections are sent, then none.
     default: "24000"
@@ -72,6 +71,15 @@ runs:
           echo '{}' > "$RUNNER_TEMP/flux-updates.json"
         fi
 
+    # A failed install leaves the CLI missing; the summary then falls back to Before merging.
+    - name: Install Copilot CLI
+      if: inputs.summarize == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        VERSION: ${{ inputs.copilot-version }}
+      run: npm install --global --no-fund --no-audit "@github/copilot@$VERSION"
+
     - name: Create or update pull request
       id: pr
       uses: actions/github-script@v8
@@ -82,8 +90,7 @@ runs:
         RELEASE_NOTES_TOKEN: ${{ inputs.release-notes-token }}
         SUMMARIZE: ${{ inputs.summarize }}
         MODEL: ${{ inputs.model }}
-        MODELS_TOKEN: ${{ inputs.models-token }}
-        MODELS_ENDPOINT: ${{ inputs.models-endpoint }}
+        COPILOT_TOKEN: ${{ inputs.copilot-token }}
         SUMMARY_MAX_INPUT_CHARS: ${{ inputs.summary-max-input-chars }}
       with:
         github-token: ${{ inputs.github-token }}

@@ -6,7 +6,7 @@ the upstream release notes, assigned per component.
 Flux finds the new tag and commits the bump. The action adds what Flux can't:
 
 - the release notes of every release between the old and new version, not only the latest
-- with `summarize: true`, a **Summary** by GitHub Models: a verdict per component (`Merge as is`,
+- with `summarize: true`, a **Summary** by the Copilot CLI: a verdict per component (`Merge as is`,
   `Needs config or secret change`, `Needs coordination`, `Breaking`) with action items citing their
   release
 - otherwise, or when the model call fails, a **Before merging** section that quotes the release
@@ -46,7 +46,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      models: read # only for summarize
+      copilot-requests: write # only for summarize
     concurrency:
       group: flux-update-pr-${{ github.ref_name }}
     steps:
@@ -66,10 +66,10 @@ jobs:
 | `base` | `main` | Branch the Flux automation checks out and the PR targets. |
 | `github-token` | `github.token` | Opens and edits the PR. |
 | `release-notes-token` | | Reads releases of private upstream repos. |
-| `summarize` | `false` | Summarize the release notes with GitHub Models; see below. |
-| `model` | `openai/gpt-4.1` | GitHub Models model ID. |
-| `models-token` | `github.token` | Token for the GitHub Models API; needs `models: read`. |
-| `models-endpoint` | `https://models.github.ai/inference/chat/completions` | Use `https://models.github.ai/orgs/<org>/inference/chat/completions` to bill the organization. |
+| `summarize` | `false` | Summarize the release notes with the Copilot CLI; see below. |
+| `model` | | Copilot model for the summary; empty uses the CLI's default. |
+| `copilot-token` | `github.token` | Token the Copilot CLI authenticates with. |
+| `copilot-version` | `1` | `@github/copilot` npm version to install. |
 | `summary-max-input-chars` | `24000` | Largest release-notes input sent to the model. |
 
 Outputs: `pull-request-number`, `pull-request-url` (empty when the branch has no changes).
@@ -82,22 +82,35 @@ The action needs `yq` and, for `version: appVersion`, `helm`; both are on GitHub
 
 ## AI summary
 
-With `summarize: true` the release notes go to GitHub Models, and its answer replaces the
-**Before merging** section. To keep the PR body short, only one of the two is shown. The full
-release notes stay below either way, and the summary says which model wrote it.
+With `summarize: true` the action installs the [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions)
+and asks it for a verdict and action items, which replace the **Before merging** section. To keep
+the PR body short, only one of the two is shown. The full release notes stay below either way, and
+the summary says what wrote it.
 
-The **Before merging** section is the fallback whenever there is no summary: `summarize` is off,
-GitHub Models isn't enabled for the organization, the call fails or times out, the answer is empty,
-or the notes are too long. The PR is created either way; the run log has a warning saying why.
+Requirements:
+
+- the calling job grants `copilot-requests: write`; the workflow's own token is enough, no secret
+- the organization policy **Allow use of Copilot CLI billed to the organization** is on (the default
+  when Copilot CLI is enabled for the organization); usage is billed to the organization
+- the repository is owned by the organization
+
+The **Before merging** section is the fallback whenever there is no summary: `summarize` is off, the
+CLI isn't installed or allowed, it fails or times out (3 minutes), the answer is empty, or the notes
+are too long. The PR is created either way; the run log has a warning saying why.
 
 Input: all release notes in the range, newest first. Above `summary-max-input-chars` (24,000
-characters, about 6k tokens, under the free tier's per-request limit) only their deploy sections are
-sent; if those are still too long, there is no summary. The model runs at temperature 0 and is told
-to use only facts from the notes, quote config keys exactly and cite the release for each action item.
+characters) only their deploy sections are sent; if those are still too long, there is no summary.
+The model is told to use only facts from the notes, quote config keys exactly and cite the release
+for each action item.
 
-Release notes are untrusted input, so the summary is advisory: the model has no tools, `@mentions`
-and the action's markers are stripped from its answer, and nothing merges on its verdict. Mentions in
-quoted release notes are defanged too, so upstream contributors aren't notified by these PRs.
+Release notes are untrusted input, so the CLI runs locked down and the summary is advisory:
+
+- non-interactive with no tool pre-approved, so every tool call is denied
+- in an empty temporary directory, without custom instructions or built-in MCP servers
+- `@mentions` and the action's markers are stripped from its answer, and nothing merges on its verdict
+
+Mentions in quoted release notes are defanged too, so upstream contributors aren't notified by these
+PRs.
 
 ## Config
 
