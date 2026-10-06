@@ -6,8 +6,11 @@ the upstream release notes, assigned per component.
 Flux finds the new tag and commits the bump. The action adds what Flux can't:
 
 - the release notes of every release between the old and new version, not only the latest
-- a **Before merging** section that collects the release notes' deploy, upgrade, migration and
-  behavior-change sections, so operators see right away whether the bump needs config changes
+- with `summarize: true`, a **Summary** by GitHub Models: a verdict per component (`Merge as is`,
+  `Needs config or secret change`, `Needs coordination`, `Breaking`) with action items citing their
+  release
+- otherwise, or when the model call fails, a **Before merging** section that quotes the release
+  notes' deploy, upgrade, migration and behavior-change sections
 - a warning when the notes announce a breaking change
 - assignees, reviewers and labels **per component**
 
@@ -43,6 +46,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      models: read # only for summarize
     concurrency:
       group: flux-update-pr-${{ github.ref_name }}
     steps:
@@ -53,6 +57,7 @@ jobs:
         with:
           # only needed when an upstream repo is private
           release-notes-token: ${{ secrets.PAT_INTERNAL_REPOSITORIES }}
+          summarize: true
 ```
 
 | Input | Default | |
@@ -61,6 +66,11 @@ jobs:
 | `base` | `main` | Branch the Flux automation checks out and the PR targets. |
 | `github-token` | `github.token` | Opens and edits the PR. |
 | `release-notes-token` | | Reads releases of private upstream repos. |
+| `summarize` | `false` | Summarize the release notes with GitHub Models; see below. |
+| `model` | `openai/gpt-4.1` | GitHub Models model ID. |
+| `models-token` | `github.token` | Token for the GitHub Models API; needs `models: read`. |
+| `models-endpoint` | `https://models.github.ai/inference/chat/completions` | Use `https://models.github.ai/orgs/<org>/inference/chat/completions` to bill the organization. |
+| `summary-max-input-chars` | `24000` | Largest release-notes input sent to the model. |
 
 Outputs: `pull-request-number`, `pull-request-url` (empty when the branch has no changes).
 
@@ -69,6 +79,25 @@ assigned or asked to review. A PR opened with `GITHUB_TOKEN` does not trigger `p
 workflows; validation that runs on `push` still reports on the branch head.
 
 The action needs `yq` and, for `version: appVersion`, `helm`; both are on GitHub's Ubuntu runners.
+
+## AI summary
+
+With `summarize: true` the release notes go to GitHub Models, and its answer replaces the
+**Before merging** section. To keep the PR body short, only one of the two is shown. The full
+release notes stay below either way, and the summary says which model wrote it.
+
+The **Before merging** section is the fallback whenever there is no summary: `summarize` is off,
+GitHub Models isn't enabled for the organization, the call fails or times out, the answer is empty,
+or the notes are too long. The PR is created either way; the run log has a warning saying why.
+
+Input: all release notes in the range, newest first. Above `summary-max-input-chars` (24,000
+characters, about 6k tokens, under the free tier's per-request limit) only their deploy sections are
+sent; if those are still too long, there is no summary. The model runs at temperature 0 and is told
+to use only facts from the notes, quote config keys exactly and cite the release for each action item.
+
+Release notes are untrusted input, so the summary is advisory: the model has no tools, `@mentions`
+and the action's markers are stripped from its answer, and nothing merges on its verdict. Mentions in
+quoted release notes are defanged too, so upstream contributors aren't notified by these PRs.
 
 ## Config
 

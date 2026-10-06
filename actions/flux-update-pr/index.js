@@ -16,6 +16,55 @@ function appVersion(comp, tag) {
   return m[1];
 }
 
+// An AI summary of the release notes, or null when summarizing is off or fails for any reason; the
+// PR then quotes the deploy notes in its Before merging section instead.
+async function summarize(entries, core) {
+  if (process.env.SUMMARIZE !== 'true') return null;
+  const model = process.env.MODEL;
+  const input = lib.summaryInput(entries, { maxChars: Number(process.env.SUMMARY_MAX_INPUT_CHARS) || undefined });
+  if (!input) {
+    core.info('No release notes to summarize, or too long even as deploy notes; using Before merging.');
+    return null;
+  }
+  try {
+    const res = await fetch(process.env.MODELS_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${process.env.MODELS_TOKEN}`,
+        'content-type': 'application/json',
+        accept: 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: 1500,
+        messages: [
+          { role: 'system', content: lib.SUMMARY_SYSTEM_PROMPT },
+          { role: 'user', content: input },
+        ],
+      }),
+      signal: AbortSignal.timeout(90_000),
+    });
+    const raw = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${raw.slice(0, 300)}`);
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(`response is not JSON: ${raw.slice(0, 200)}`);
+    }
+    const choice = data.choices?.[0];
+    let text = lib.sanitizeSummary(choice?.message?.content);
+    if (!text) throw new Error('empty completion');
+    if (choice.finish_reason === 'length') text += '\n\n_Summary cut off at the output limit._';
+    core.info(`AI summary by ${model}: ${data.usage?.prompt_tokens ?? '?'} prompt / ${data.usage?.completion_tokens ?? '?'} completion tokens`);
+    return { text, model };
+  } catch (err) {
+    core.warning(`AI summary failed, using Before merging instead: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = async ({ github, context, core }) => {
   const { owner, repo } = context.repo;
   const base = process.env.BASE;
@@ -109,7 +158,8 @@ module.exports = async ({ github, context, core }) => {
   let pr = open[0];
   // Leave room for what people wrote around the managed block, plus some slack.
   const kept = pr ? lib.mergeBody(pr.body, '').length : 0;
-  const managed = lib.renderBody(entries, { head, bodyLimit: Math.max(5000, lib.MAX_BODY - kept - 1000) });
+  const summary = await summarize(entries, core);
+  const managed = lib.renderBody(entries, { head, summary, bodyLimit: Math.max(5000, lib.MAX_BODY - kept - 1000) });
   if (pr) {
     ({ data: pr } = await github.rest.pulls.update({ owner, repo, pull_number: pr.number, title, body: lib.mergeBody(pr.body, managed) }));
     core.info(`Updated #${pr.number}`);
