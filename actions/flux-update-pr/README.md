@@ -1,9 +1,9 @@
 # flux-update-pr
 
-Reusable workflow that turns a Flux `ImageUpdateAutomation` push branch into a pull request with
+Composite action that turns a Flux `ImageUpdateAutomation` push branch into a pull request with
 the upstream release notes, assigned per component.
 
-Flux finds the new tag and commits the bump. The workflow adds what Flux can't:
+Flux finds the new tag and commits the bump. The action adds what Flux can't:
 
 - the release notes of every release between the old and new version, not only the latest
 - a **Before merging** section that collects the release notes' deploy, upgrade, migration and
@@ -17,18 +17,18 @@ Flux finds the new tag and commits the bump. The workflow adds what Flux can't:
 ImagePolicy picks new tag
   -> ImageUpdateAutomation commits the bump to <env>/<component>-updates   (push.branch)
   -> push triggers the caller workflow in the k8s repo
-  -> flux-update-pr diffs the branch against main, reads the changed $imagepolicy setters,
+  -> the action diffs the branch against main, reads the changed $imagepolicy setters,
      fetches the release notes and creates or refreshes the PR
 ```
 
 Environments that should deploy without review (usually dev) push straight to `main` and never
 reach this workflow.
 
-The workflow only rewrites the part of the PR body between
+The action only rewrites the part of the PR body between
 `<!-- flux-update-pr:begin -->` and `<!-- flux-update-pr:end -->`; anything written outside the
 markers survives later pushes.
 
-## Caller
+## Usage
 
 ```yaml
 # .github/workflows/flux-update-pr.yaml in the k8s repo
@@ -39,20 +39,36 @@ on:
       - "*/*-updates"
 jobs:
   pr:
-    uses: pinax-network/.github/.github/workflows/flux-update-pr.yaml@main
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
-    secrets:
-      # only needed when an upstream repo is private
-      release-notes-token: ${{ secrets.PAT_INTERNAL_REPOSITORIES }}
+    concurrency:
+      group: flux-update-pr-${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: pinax-network/.github/actions/flux-update-pr@main
+        with:
+          # only needed when an upstream repo is private
+          release-notes-token: ${{ secrets.PAT_INTERNAL_REPOSITORIES }}
 ```
 
-Inputs: `config` (default `.github/flux-updates.yaml`) and `base` (default `main`).
+| Input | Default | |
+|---|---|---|
+| `config` | `.github/flux-updates.yaml` | Component config in the calling repo. |
+| `base` | `main` | Branch the Flux automation checks out and the PR targets. |
+| `github-token` | `github.token` | Opens and edits the PR. |
+| `release-notes-token` | | Reads releases of private upstream repos. |
 
-The PR is opened with `GITHUB_TOKEN`, so the owner of `release-notes-token` can still be
+Outputs: `pull-request-number`, `pull-request-url` (empty when the branch has no changes).
+
+The PR is opened with `github-token`, so the owner of `release-notes-token` can still be
 assigned or asked to review. A PR opened with `GITHUB_TOKEN` does not trigger `pull_request`
 workflows; validation that runs on `push` still reports on the branch head.
+
+The action needs `yq` and, for `version: appVersion`, `helm`; both are on GitHub's Ubuntu runners.
 
 ## Config
 
@@ -94,3 +110,8 @@ components:
 
 Keep one `ImageUpdateAutomation` (and so one push branch) per component when the components have
 different reviewers; Flux batches every change under its `update.path` into one branch.
+
+## Development
+
+The logic is in `index.js` (GitHub API, git, helm) and `lib.js` (pure functions). Run the tests
+with `node --test actions/flux-update-pr/`.

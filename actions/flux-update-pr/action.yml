@@ -1,0 +1,67 @@
+name: Flux update PR
+description: >-
+  Turn a Flux ImageUpdateAutomation push branch into a pull request with the upstream release notes,
+  assigned per component. See README.md next to this file.
+
+inputs:
+  config:
+    description: Path of the component config in the calling repository.
+    default: .github/flux-updates.yaml
+  base:
+    description: Branch the Flux automation checks out and the PR targets.
+    default: main
+  github-token:
+    description: Token that opens and edits the PR.
+    default: ${{ github.token }}
+  release-notes-token:
+    description: >-
+      Token that can read releases of private upstream repositories. Kept apart from github-token so
+      the PAT owner can still be assigned or asked to review.
+    default: ""
+
+outputs:
+  pull-request-number:
+    description: Number of the created or updated PR; empty when the branch has no changes.
+    value: ${{ steps.pr.outputs.pull-request-number }}
+  pull-request-url:
+    description: URL of the created or updated PR.
+    value: ${{ steps.pr.outputs.pull-request-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch base branch
+      shell: bash
+      env:
+        BASE: ${{ inputs.base }}
+      run: |
+        if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+          git fetch --quiet --unshallow --no-tags origin
+        fi
+        git fetch --quiet --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
+
+    - name: Read config
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+      run: |
+        if [ -f "$CONFIG" ]; then
+          yq -o=json '.' "$CONFIG" > "$RUNNER_TEMP/flux-updates.json"
+        else
+          echo "::notice::$CONFIG not found, using defaults for every component"
+          echo '{}' > "$RUNNER_TEMP/flux-updates.json"
+        fi
+
+    - name: Create or update pull request
+      id: pr
+      uses: actions/github-script@v8
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        BASE: ${{ inputs.base }}
+        CONFIG_JSON: ${{ runner.temp }}/flux-updates.json
+        RELEASE_NOTES_TOKEN: ${{ inputs.release-notes-token }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const main = require(`${process.env.ACTION_PATH}/index.js`);
+          await main({ github, context, core });
