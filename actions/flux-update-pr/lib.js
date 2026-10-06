@@ -85,12 +85,46 @@ function semver(s) {
   return m && { major: +m[1], minor: +m[2], patch: +m[3], pre: m[4] || '' };
 }
 
+// SemVer 2.0.0 §11: identifiers compare one by one; numeric ones numerically and below alphanumeric
+// ones; a shorter set of otherwise equal identifiers sorts first; no prerelease sorts last.
+function comparePrerelease(a, b) {
+  if (a === b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  const x = a.split('.');
+  const y = b.split('.');
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if (x[i] === undefined) return -1;
+    if (y[i] === undefined) return 1;
+    const nx = /^\d+$/.test(x[i]);
+    const ny = /^\d+$/.test(y[i]);
+    if (nx && ny) {
+      const d = Number(x[i]) - Number(y[i]);
+      if (d) return d;
+    } else if (nx !== ny) {
+      return nx ? -1 : 1;
+    } else if (x[i] !== y[i]) {
+      return x[i] < y[i] ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
 function compareSemver(a, b) {
   for (const k of ['major', 'minor', 'patch']) if (a[k] !== b[k]) return a[k] - b[k];
-  if (a.pre === b.pre) return 0;
-  if (!a.pre) return 1;
-  if (!b.pre) return -1;
-  return a.pre.localeCompare(b.pre, undefined, { numeric: true });
+  return comparePrerelease(a.pre, b.pre);
+}
+
+// The upstream tag of the release for version, e.g. `v1.2.3` for appVersion `1.2.3`; undefined when
+// no release matches, so callers don't link to refs that don't exist.
+function releaseTag(releases, version, prefix = '') {
+  const want = semver(version);
+  if (!want) return undefined;
+  return releases.find((r) => {
+    if (!r.tag_name.startsWith(prefix)) return false;
+    const v = semver(r.tag_name.slice(prefix.length));
+    return v && compareSemver(v, want) === 0;
+  })?.tag_name;
 }
 
 // Releases in (from, to], newest first. Drafts are skipped; prereleases only when asked for or when
@@ -108,12 +142,22 @@ function selectReleases(releases, from, to, { prefix = '', includePrereleases = 
 }
 
 // Sections of a markdown body whose heading matches re, each running until the next heading of the
-// same or a higher level.
+// same or a higher level. `#` lines inside fenced code blocks are not headings.
 function sectionsOf(body, re) {
   const out = [];
   let cur = null;
+  let fence = null;
   for (const line of (body || '').split(/\r?\n/)) {
-    const h = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (f && !fence) {
+      fence = f[1];
+    } else if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !line.trim().slice(f[1].length).trim()) {
+      fence = null;
+    } else if (fence) {
+      if (cur) cur.text.push(line);
+      continue;
+    }
+    const h = !f && /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
     if (h && cur && h[1].length <= cur.level) cur = null;
     if (h && !cur && re.test(h[2])) {
       cur = { level: h[1].length, heading: h[2], text: [] };
@@ -130,60 +174,88 @@ function shaOf(tag) {
   return /^([a-f0-9]{7,40})(?:-\d+)?$/.exec(tag || '')?.[1];
 }
 
-// The managed part of the PR body. entries: [{ change, comp, fromVersion, toVersion, releases, deploy, breaking, notes }]
+// The managed part of the PR body, at most bodyLimit characters. entries:
+// [{ change, comp, fromVersion, toVersion, releases, deploy, breaking, notes }]
+//
+// Deploy notes and release bodies are filled in while they fit, deploy notes first; the rest
+// shrink to links to their release.
 function renderBody(entries, { head, bodyLimit = 60000 }) {
   const code = (s) => (s ? `\`${s}\`` : '_new_');
   const ver = (tag, v) => (v && v !== tag ? `${code(tag)} (app ${code(v)})` : code(tag));
-  const lines = [BEGIN, '## Updates', '', '| Component | From | To | Release notes | Files |', '|---|---|---|---|---|'];
+  const date = (r) => (r.published_at || r.created_at || '').slice(0, 10);
+  const parts = [];
+  const fixed = (...lines) => lines.forEach((l) => parts.push({ text: l }));
+  const optional = (priority, full, short) => parts.push({ text: short, full, priority });
+
+  fixed(BEGIN, '## Updates', '', '| Component | From | To | Release notes | Files |', '|---|---|---|---|---|');
   for (const e of entries) {
     const flags = [
       e.breaking.length && `:warning: breaking (${e.breaking.join(', ')})`,
       e.deploy.length && 'deploy notes',
     ].filter(Boolean);
     const notes = [`${e.releases.length}`, ...flags].join(', ');
-    lines.push(`| ${e.comp.id} | ${ver(e.change.from, e.fromVersion)} | ${ver(e.change.to, e.toVersion)} | ${notes} | ${e.change.files.map(code).join('<br>')} |`);
+    fixed(`| ${e.comp.id} | ${ver(e.change.from, e.fromVersion)} | ${ver(e.change.to, e.toVersion)} | ${notes} | ${e.change.files.map(code).join('<br>')} |`);
   }
   if (entries.some((e) => e.breaking.length)) {
-    lines.push('', '> [!WARNING]', '> Release notes in this update announce a breaking change. Read them before merging.');
+    fixed('', '> [!WARNING]', '> Release notes in this update announce a breaking change. Read them before merging.');
   }
   if (entries.some((e) => e.deploy.length)) {
-    lines.push('', '## Before merging', '');
+    fixed('', '## Before merging', '');
     for (const e of entries) {
       for (const d of e.deploy) {
-        lines.push(`#### ${e.comp.id} [${d.release.tag_name}](${d.release.html_url}): ${d.heading}`, '', d.text, '');
+        const link = `${e.comp.id} [${d.release.tag_name}](${d.release.html_url}): ${d.heading}`;
+        optional(0, `#### ${link}\n\n${d.text}\n`, `- ${link} (too long to include here; read it in the release)`);
       }
     }
   }
-  let truncated = false;
   for (const e of entries) {
-    lines.push('', `## ${e.comp.id} ${e.change.from ? `${e.change.from} → ` : ''}${e.change.to}`, '');
+    fixed('', `## ${e.comp.id} ${e.change.from ? `${e.change.from} → ` : ''}${e.change.to}`, '');
     for (const r of e.releases) {
-      const date = (r.published_at || r.created_at || '').slice(0, 10);
-      const block = [
-        `<details open><summary><b>${r.tag_name}</b> (${date}) <a href="${r.html_url}">release</a></summary>`,
+      const full = [
+        `<details open><summary><b>${r.tag_name}</b> (${date(r)}) <a href="${r.html_url}">release</a></summary>`,
         '',
         (r.body || '_No description._').trim(),
         '',
         '</details>',
         '',
-      ];
-      if (lines.join('\n').length + block.join('\n').length > bodyLimit) {
-        truncated = true;
-        lines.push(`- [${r.tag_name}](${r.html_url}) (${date})`);
-      } else {
-        lines.push(...block);
-      }
+      ].join('\n');
+      optional(1, full, `- [${r.tag_name}](${r.html_url}) (${date(r)})`);
     }
-    lines.push(...e.notes);
+    fixed(...e.notes);
   }
-  if (truncated) lines.push('', '_Some release notes were too long for the PR body; follow the links above._');
-  lines.push(
+  const truncatedNote = '_Some release notes were too long for the PR body; follow the links above._';
+  const footer = [
     '',
     `<sub>Generated by [flux-update-pr](https://github.com/pinax-network/.github/tree/main/actions/flux-update-pr) from \`${head}\`.</sub>`,
     END,
-  );
-  return lines.join('\n');
+  ];
+
+  // Start from the short form of everything, then expand by priority while the budget allows.
+  const length = (texts) => texts.reduce((n, t) => n + t.length + 1, 0);
+  let size = length(parts.map((p) => p.text)) + length(footer) + truncatedNote.length + 2;
+  for (const priority of [0, 1]) {
+    for (const p of parts) {
+      if (p.priority !== priority) continue;
+      const grow = p.full.length - p.text.length;
+      if (size + grow <= bodyLimit) {
+        p.text = p.full;
+        size += grow;
+      }
+    }
+  }
+  const lines = parts.map((p) => p.text);
+  if (parts.some((p) => p.full && p.text !== p.full)) lines.push('', truncatedNote);
+  let body = [...lines, ...footer].join('\n');
+  // Even the short forms can overflow with hundreds of releases; keep the markers intact.
+  if (body.length > bodyLimit) {
+    const tail = `\n\n${truncatedNote}\n${END}`;
+    body = body.slice(0, Math.max(0, bodyLimit - tail.length)) + tail;
+  }
+  return body;
 }
+
+// GitHub rejects PR bodies above 65536 characters.
+const MAX_BODY = 65536;
 
 // Replace the managed part of an existing body, keeping what people wrote around it.
 function mergeBody(old, managed) {
@@ -204,6 +276,7 @@ function titleFor(head, entries) {
 module.exports = {
   BEGIN,
   END,
+  MAX_BODY,
   DEFAULT_DEPLOY_SECTIONS,
   DEFAULT_BREAKING,
   tagOf,
@@ -212,6 +285,7 @@ module.exports = {
   componentFor,
   semver,
   compareSemver,
+  releaseTag,
   selectReleases,
   sectionsOf,
   shaOf,

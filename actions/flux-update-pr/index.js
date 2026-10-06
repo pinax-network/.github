@@ -44,12 +44,8 @@ module.exports = async ({ github, context, core }) => {
   const listReleases = async (fullName) => {
     if (releasesCache.has(fullName)) return releasesCache.get(fullName);
     const [o, r] = fullName.split('/');
-    const all = [];
-    const pages = notesClient.paginate.iterator(notesClient.rest.repos.listReleases, { owner: o, repo: r, per_page: 100 });
-    for await (const page of pages) {
-      all.push(...page.data);
-      if (all.length >= 500) break;
-    }
+    // All of them: the API lists by creation date, so a backport can sit after any number of newer releases.
+    const all = await notesClient.paginate(notesClient.rest.repos.listReleases, { owner: o, repo: r, per_page: 100 });
     releasesCache.set(fullName, all);
     return all;
   };
@@ -78,7 +74,8 @@ module.exports = async ({ github, context, core }) => {
         );
         continue;
       }
-      entry.releases = lib.selectReleases(await listReleases(comp.repo), from, to, {
+      const releases = await listReleases(comp.repo);
+      entry.releases = lib.selectReleases(releases, from, to, {
         prefix,
         includePrereleases: comp['include-prereleases'],
       });
@@ -89,10 +86,10 @@ module.exports = async ({ github, context, core }) => {
       if (entry.releases.length === 0) {
         entry.notes.push(`_No GitHub releases found in ${comp.repo} between \`${from ?? '?'}\` and \`${to}\`._`);
       }
-      if (lib.semver(from)) {
-        entry.notes.push(
-          `[Full diff ${prefix}${from}...${prefix}${to}](https://github.com/${comp.repo}/compare/${prefix}${from}...${prefix}${to})`,
-        );
+      const fromTag = lib.releaseTag(releases, from, prefix);
+      const toTag = lib.releaseTag(releases, to, prefix);
+      if (fromTag && toTag) {
+        entry.notes.push(`[Full diff ${fromTag}...${toTag}](https://github.com/${comp.repo}/compare/${fromTag}...${toTag})`);
       }
     } catch (err) {
       const status = err.status ? ` (HTTP ${err.status})` : '';
@@ -107,10 +104,12 @@ module.exports = async ({ github, context, core }) => {
 
   // ---- 3. Create or update the pull request, then assign it.
 
-  const managed = lib.renderBody(entries, { head });
   const title = lib.titleFor(head, entries);
   const { data: open } = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, base, state: 'open' });
   let pr = open[0];
+  // Leave room for what people wrote around the managed block, plus some slack.
+  const kept = pr ? lib.mergeBody(pr.body, '').length : 0;
+  const managed = lib.renderBody(entries, { head, bodyLimit: Math.max(5000, lib.MAX_BODY - kept - 1000) });
   if (pr) {
     ({ data: pr } = await github.rest.pulls.update({ owner, repo, pull_number: pr.number, title, body: lib.mergeBody(pr.body, managed) }));
     core.info(`Updated #${pr.number}`);

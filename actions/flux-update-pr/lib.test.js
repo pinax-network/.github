@@ -129,19 +129,85 @@ test('titleFor derives the scope from the branch', () => {
   assert.equal(lib.titleFor('dev/all-updates', many), 'dev: bump 10 components');
 });
 
-test('renderBody truncates release bodies past the limit but keeps links', () => {
-  const release = (tag) => ({ tag_name: tag, html_url: `https://x/${tag}`, published_at: '2026-10-05T00:00:00Z', body: 'x'.repeat(400) });
-  const entry = {
-    change: { from: 'v1.0.0', to: 'v1.2.0', files: ['f.yaml'] },
-    comp: { id: 'app' },
-    releases: [release('v1.2.0'), release('v1.1.0')],
-    deploy: [],
-    breaking: [],
-    notes: [],
-  };
-  const body = lib.renderBody([entry], { head: 'prod/app-updates', bodyLimit: 900 });
+const release = (tag, body = 'x'.repeat(400)) => ({ tag_name: tag, html_url: `https://x/${tag}`, published_at: '2026-10-05T00:00:00Z', body });
+const entryWith = (fields) => ({
+  change: { from: 'v1.0.0', to: 'v1.2.0', files: ['f.yaml'] },
+  comp: { id: 'app' },
+  releases: [],
+  deploy: [],
+  breaking: [],
+  notes: [],
+  ...fields,
+});
+
+test('renderBody expands release bodies while they fit and links the rest', () => {
+  const body = lib.renderBody([entryWith({ releases: [release('v1.2.0'), release('v1.1.0')] })], { head: 'prod/app-updates', bodyLimit: 1100 });
+  assert.ok(body.length <= 1100);
   assert.match(body, /<b>v1\.2\.0<\/b>/);
   assert.match(body, /- \[v1\.1\.0\]\(https:\/\/x\/v1\.1\.0\)/);
   assert.match(body, /too long for the PR body/);
   assert.ok(body.startsWith(lib.BEGIN) && body.endsWith(lib.END));
+});
+
+test('renderBody budgets deploy notes too, and prefers them over release bodies', () => {
+  const releases = [release('v1.2.0', 'y'.repeat(3000)), release('v1.1.0', 'y'.repeat(3000))];
+  const deploy = releases.map((r) => ({ release: r, heading: 'Deploy notes', text: 'z'.repeat(3000) }));
+  const body = lib.renderBody([entryWith({ releases, deploy })], { head: 'prod/app-updates', bodyLimit: 5000 });
+  assert.ok(body.length <= 5000, `body is ${body.length} characters`);
+  assert.equal((body.match(/z{3000}/g) || []).length, 1);
+  assert.doesNotMatch(body, /y{3000}/);
+  assert.match(body, /- app \[v1\.1\.0\]\(https:\/\/x\/v1\.1\.0\): Deploy notes \(too long/);
+});
+
+test('renderBody stays under the limit even when the links alone overflow', () => {
+  const releases = Array.from({ length: 500 }, (_, i) => release(`v1.${i}.0`));
+  const body = lib.renderBody([entryWith({ releases })], { head: 'prod/app-updates', bodyLimit: 5000 });
+  assert.ok(body.length <= 5000);
+  assert.ok(body.startsWith(lib.BEGIN) && body.endsWith(lib.END));
+});
+
+test('compareSemver follows SemVer prerelease precedence', () => {
+  const ordered = ['1.0.0-2', '1.0.0-10', '1.0.0-2a', '1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta', '1.0.0-beta.2', '1.0.0-beta.11', '1.0.0-rc.1', '1.0.0'];
+  for (let i = 1; i < ordered.length; i++) {
+    assert.ok(lib.compareSemver(lib.semver(ordered[i - 1]), lib.semver(ordered[i])) < 0, `${ordered[i - 1]} < ${ordered[i]}`);
+    assert.ok(lib.compareSemver(lib.semver(ordered[i]), lib.semver(ordered[i - 1])) > 0, `${ordered[i]} > ${ordered[i - 1]}`);
+  }
+  const releases = [{ tag_name: 'v1.0.0-2a', prerelease: true }, { tag_name: 'v1.0.0-10', prerelease: true }];
+  assert.deepEqual(lib.selectReleases(releases, '1.0.0-2', '1.0.0-2a').map((r) => r.tag_name), ['v1.0.0-2a', 'v1.0.0-10']);
+});
+
+test('releaseTag resolves the upstream tag of a version, or nothing', () => {
+  const releases = [{ tag_name: 'v2.10.0' }, { tag_name: 'v2.9.1' }, { tag_name: 'redis/1.2.3' }];
+  assert.equal(lib.releaseTag(releases, '2.10.0'), 'v2.10.0');
+  assert.equal(lib.releaseTag(releases, 'v2.9.1'), 'v2.9.1');
+  assert.equal(lib.releaseTag(releases, '1.2.3', 'redis/'), 'redis/1.2.3');
+  assert.equal(lib.releaseTag(releases, '2.11.0'), undefined);
+  assert.equal(lib.releaseTag(releases, undefined), undefined);
+});
+
+test('sectionsOf ignores headings inside fenced code blocks', () => {
+  const body = [
+    '## Deploy notes',
+    '',
+    '```sh',
+    '# Restart the pods',
+    'kubectl rollout restart deploy/app',
+    '```',
+    '',
+    '~~~~',
+    '## not a heading',
+    '~~~',
+    'still fenced',
+    '~~~~',
+    '',
+    'Then run the migration.',
+    '',
+    '## What changed',
+    'other',
+  ].join('\n');
+  const [section, ...rest] = lib.sectionsOf(body, new RegExp(lib.DEFAULT_DEPLOY_SECTIONS, 'i'));
+  assert.equal(rest.length, 0);
+  assert.match(section.text, /kubectl rollout restart deploy\/app\n```/);
+  assert.match(section.text, /still fenced\n~~~~/);
+  assert.match(section.text, /Then run the migration\.$/);
 });
