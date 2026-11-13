@@ -1,0 +1,160 @@
+name: Docker build
+description: Builds a Docker image the Pinax way and pushes it to ghcr.io/<owner>/<repository>.
+
+inputs:
+  image-name:
+    description: >-
+      Name of the image without registry and owner. Defaults to the repository name, only set this if the image is
+      named differently.
+    default: ""
+  context:
+    description: Build context.
+    default: "."
+  file:
+    description: Path to the Dockerfile. Defaults to the Dockerfile in the build context.
+    default: ""
+  target:
+    description: Stage of the Dockerfile to build. Defaults to the last stage.
+    default: ""
+  tag-suffix:
+    description: Suffix appended to every image tag, for example "-debian" for a variant built from another target.
+    default: ""
+  build-args:
+    description: Additional build arguments, one KEY=VALUE per line. VERSION and COMMIT are always passed.
+    default: ""
+  ssh-key:
+    description: >-
+      Private SSH key forwarded to the build (RUN --mount=type=ssh) to fetch private dependencies. Pass
+      secrets.SSH_EOSN_DEPLOY_KEY.
+    default: ""
+  platforms:
+    description: Comma separated list of target platforms.
+    default: linux/amd64
+  push:
+    description: Whether to push the image. Set to false to only verify that the image builds, for example on pull requests.
+    default: "true"
+
+outputs:
+  image:
+    description: Full image name without a tag.
+    value: ${{ steps.vars.outputs.image }}
+  version:
+    description: The VERSION build argument, the git tag for tagged commits and "develop" otherwise.
+    value: ${{ steps.vars.outputs.version }}
+  commit:
+    description: The COMMIT build argument, the short commit hash.
+    value: ${{ steps.vars.outputs.commit }}
+  tags:
+    description: The image references that were built, one per line.
+    value: ${{ steps.vars.outputs.tags }}
+  digest:
+    description: Digest of the built image.
+    value: ${{ steps.build.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Determine image name, version and tags
+      id: vars
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        TAG_SUFFIX: ${{ inputs.tag-suffix }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        name="${IMAGE_NAME:-${GITHUB_REPOSITORY#*/}}"
+        name="${name,,}"
+        if [[ ! "$name" =~ ^[a-z0-9]+([._-]+[a-z0-9]+)*$ ]]; then
+          echo "::error::'$name' is not a valid image name. Set image-name to the name only, without registry and owner."
+          exit 1
+        fi
+        image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$name"
+        commit="${GITHUB_SHA::7}"
+
+        # Tagged commits are releases and only get their immutable version tag. Everything else gets a unique
+        # <commit>-<timestamp> tag, and the default branch additionally moves the develop tag.
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          version="$GITHUB_REF_NAME"
+          tags="$image:$version$TAG_SUFFIX"
+        else
+          version="develop"
+          tags="$image:$commit-$(date +%s)$TAG_SUFFIX"
+          if [[ -n "$DEFAULT_BRANCH" && "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+            tags+=$'\n'"$image:develop$TAG_SUFFIX"
+          fi
+        fi
+
+        {
+          echo "image=$image"
+          echo "version=$version"
+          echo "commit=$commit"
+          echo "cache-scope=$name$TAG_SUFFIX"
+          echo "tags<<EOF_TAGS"
+          echo "$tags"
+          echo "EOF_TAGS"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Start SSH agent
+      id: ssh
+      if: inputs.ssh-key != ''
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh-key }}
+      run: |
+        sock="$(mktemp -u "$RUNNER_TEMP/ssh-agent.XXXXXX")"
+        ssh-agent -a "$sock" > /dev/null
+        SSH_AUTH_SOCK="$sock" ssh-add - <<< "$SSH_KEY"
+        echo "sock=$sock" >> "$GITHUB_OUTPUT"
+
+    - name: Set up QEMU
+      if: inputs.platforms != 'linux/amd64'
+      uses: docker/setup-qemu-action@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v4
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+
+    - name: Generate image labels
+      id: meta
+      uses: docker/metadata-action@v6
+      with:
+        images: ${{ steps.vars.outputs.image }}
+
+    - name: Build and push
+      id: build
+      uses: docker/build-push-action@v7
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        target: ${{ inputs.target }}
+        platforms: ${{ inputs.platforms }}
+        push: ${{ inputs.push }}
+        tags: ${{ steps.vars.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: |
+          VERSION=${{ steps.vars.outputs.version }}
+          COMMIT=${{ steps.vars.outputs.commit }}
+          ${{ inputs.build-args }}
+        ssh: ${{ steps.ssh.outputs.sock && format('default={0}', steps.ssh.outputs.sock) || '' }}
+        cache-from: type=gha,scope=${{ steps.vars.outputs.cache-scope }}
+        cache-to: type=gha,mode=max,scope=${{ steps.vars.outputs.cache-scope }}
+
+    - name: Write summary
+      shell: bash
+      env:
+        TAGS: ${{ steps.vars.outputs.tags }}
+        DIGEST: ${{ steps.build.outputs.digest }}
+        PUSH: ${{ inputs.push }}
+      run: |
+        {
+          if [[ "$PUSH" == "true" ]]; then echo "### Pushed Docker image"; else echo "### Built Docker image (not pushed)"; fi
+          echo
+          while IFS= read -r tag; do echo "- \`$tag\`"; done <<< "$TAGS"
+          if [[ -n "$DIGEST" ]]; then echo; echo "Digest: \`$DIGEST\`"; fi
+        } >> "$GITHUB_STEP_SUMMARY"
