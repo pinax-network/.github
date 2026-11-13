@@ -12,6 +12,12 @@ permissions:
   packages: read
 
 jobs:
+  vars:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: actions/docker-build/test/vars.test.sh
+
   plain:
     runs-on: ubuntu-latest
     steps:
@@ -23,7 +29,10 @@ jobs:
           # the repository name (.github) is not a valid image name
           image-name: docker-build-test
           context: actions/docker-build/test
-          build-args: EXTRA=passed
+          # VERSION must not be overridable, the fixture fails the build if it is
+          build-args: |
+            EXTRA=passed
+            VERSION=overridden
           push: false
 
       - name: Check outputs

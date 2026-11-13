@@ -20,7 +20,7 @@ inputs:
     description: Suffix appended to every image tag, for example "-debian" for a variant built from another target.
     default: ""
   build-args:
-    description: Additional build arguments, one KEY=VALUE per line. VERSION and COMMIT are always passed.
+    description: Additional build arguments, one KEY=VALUE per line. VERSION and COMMIT are always passed and can't be overridden.
     default: ""
   ssh-key:
     description: >-
@@ -61,38 +61,9 @@ runs:
         IMAGE_NAME: ${{ inputs.image-name }}
         TAG_SUFFIX: ${{ inputs.tag-suffix }}
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      run: |
-        name="${IMAGE_NAME:-${GITHUB_REPOSITORY#*/}}"
-        name="${name,,}"
-        if [[ ! "$name" =~ ^[a-z0-9]+([._-]+[a-z0-9]+)*$ ]]; then
-          echo "::error::'$name' is not a valid image name. Set image-name to the name only, without registry and owner."
-          exit 1
-        fi
-        image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$name"
-        commit="${GITHUB_SHA::7}"
-
-        # Tagged commits are releases and only get their immutable version tag. Everything else gets a unique
-        # <commit>-<timestamp> tag, and the default branch additionally moves the develop tag.
-        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-          version="$GITHUB_REF_NAME"
-          tags="$image:$version$TAG_SUFFIX"
-        else
-          version="develop"
-          tags="$image:$commit-$(date +%s)$TAG_SUFFIX"
-          if [[ -n "$DEFAULT_BRANCH" && "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
-            tags+=$'\n'"$image:develop$TAG_SUFFIX"
-          fi
-        fi
-
-        {
-          echo "image=$image"
-          echo "version=$version"
-          echo "commit=$commit"
-          echo "cache-scope=$name$TAG_SUFFIX"
-          echo "tags<<EOF_TAGS"
-          echo "$tags"
-          echo "EOF_TAGS"
-        } >> "$GITHUB_OUTPUT"
+        HAS_SSH_KEY: ${{ inputs.ssh-key != '' }}
+        REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+      run: "$GITHUB_ACTION_PATH/vars.sh"
 
     - name: Start SSH agent
       id: ssh
@@ -137,13 +108,14 @@ runs:
         push: ${{ inputs.push }}
         tags: ${{ steps.vars.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
+        # VERSION and COMMIT come last so they can't be overridden and always match the outputs and tags
         build-args: |
+          ${{ inputs.build-args }}
           VERSION=${{ steps.vars.outputs.version }}
           COMMIT=${{ steps.vars.outputs.commit }}
-          ${{ inputs.build-args }}
         ssh: ${{ steps.ssh.outputs.sock && format('default={0}', steps.ssh.outputs.sock) || '' }}
         cache-from: type=gha,scope=${{ steps.vars.outputs.cache-scope }}
-        cache-to: type=gha,mode=max,scope=${{ steps.vars.outputs.cache-scope }}
+        cache-to: type=gha,mode=${{ steps.vars.outputs.cache-mode }},scope=${{ steps.vars.outputs.cache-scope }}
 
     - name: Write summary
       shell: bash

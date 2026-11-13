@@ -41,7 +41,7 @@ To also verify the image on pull requests, add `pull_request:` to the triggers a
 | `file` | `<context>/Dockerfile` | Path to the Dockerfile. |
 | `target` | last stage | Stage of the Dockerfile to build. |
 | `tag-suffix` | | Appended to every tag, for variants built from another target (e.g. `-debian`). |
-| `build-args` | | Additional build arguments, one `KEY=VALUE` per line. |
+| `build-args` | | Additional build arguments, one `KEY=VALUE` per line. `VERSION` and `COMMIT` can't be overridden. |
 | `ssh-key` | | Private SSH key forwarded to the build to fetch private dependencies. |
 | `platforms` | `linux/amd64` | Comma separated list of target platforms. |
 | `push` | `true` | Set to `false` to only verify that the image builds. |
@@ -60,6 +60,9 @@ with the workflow token. The calling job needs `packages: write` (`packages: rea
 | Any other ref | `<commit>-<unix timestamp>` | `develop` | short commit hash |
 
 `develop` is the only moving tag, there is no `latest` and no major version tag: deployments pin an exact version.
+
+Docker tags can't contain `+`, so a git tag with SemVer build metadata such as `v1.4.2+build.1` is pushed as
+`v1.4.2-build.1`. `VERSION` keeps the git tag as is.
 
 `VERSION` and `COMMIT` are passed as build arguments on every build. Declare them in the Dockerfile and hand them
 to the compiler, see the reference Dockerfile below.
@@ -89,6 +92,12 @@ Build each target in its own matrix job and give all but the default one a suffi
 `SSH_EOSN_DEPLOY_KEY` is an organization secret that is available to every repository. The action loads it into
 an SSH agent and forwards the agent to the build. The key is only reachable from `RUN --mount=type=ssh` steps and
 never ends up in an image layer, unlike a token passed as a build argument.
+
+## Cache
+
+Layers are cached in the GitHub Actions cache, including the build stages. Those hold the sources of the private
+dependencies, and the cache of a public repository can be read by pull requests from forks. A public repository
+that passes `ssh-key` therefore only caches the final stage, which makes its builds slower.
 
 ## Reference Dockerfile for Go
 
