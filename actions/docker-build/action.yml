@@ -73,8 +73,10 @@ runs:
         SSH_KEY: ${{ inputs.ssh-key }}
       run: |
         sock="$(mktemp -u "$RUNNER_TEMP/ssh-agent.XXXXXX")"
-        ssh-agent -a "$sock" > /dev/null
-        SSH_AUTH_SOCK="$sock" ssh-add - <<< "$SSH_KEY"
+        eval "$(ssh-agent -a "$sock")" > /dev/null
+        # written before adding the key, so the agent is stopped even if that fails
+        echo "pid=$SSH_AGENT_PID" >> "$GITHUB_OUTPUT"
+        ssh-add - <<< "$SSH_KEY"
         echo "sock=$sock" >> "$GITHUB_OUTPUT"
 
     - name: Set up QEMU
@@ -116,6 +118,14 @@ runs:
         ssh: ${{ steps.ssh.outputs.sock && format('default={0}', steps.ssh.outputs.sock) || '' }}
         cache-from: type=gha,scope=${{ steps.vars.outputs.cache-scope }}
         cache-to: type=gha,mode=${{ steps.vars.outputs.cache-mode }},scope=${{ steps.vars.outputs.cache-scope }}
+
+    # The key must not stay usable by later steps of the calling job, also not after a failed build.
+    - name: Stop SSH agent
+      if: always() && steps.ssh.outputs.pid != ''
+      shell: bash
+      env:
+        SSH_AGENT_PID: ${{ steps.ssh.outputs.pid }}
+      run: ssh-agent -k > /dev/null
 
     - name: Write summary
       shell: bash

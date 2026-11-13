@@ -90,6 +90,13 @@ jobs:
             [[ "$tag" == *-ssh ]] || { echo "tag $tag misses the suffix"; exit 1; }
           done <<< "$TAGS"
 
+      - name: Check that the SSH agent was stopped
+        run: |
+          if compgen -G "$RUNNER_TEMP/ssh-agent.*" > /dev/null || pgrep -x ssh-agent > /dev/null; then
+            echo "the SSH agent is still running after the action finished"
+            exit 1
+          fi
+
   invalid-image-name:
     runs-on: ubuntu-latest
     steps:
