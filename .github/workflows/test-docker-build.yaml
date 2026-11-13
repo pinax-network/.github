@@ -1,0 +1,117 @@
+name: Test docker-build
+
+on:
+  push:
+    branches: [main]
+    paths: ["actions/docker-build/**", ".github/workflows/test-docker-build.yaml"]
+  pull_request:
+    paths: ["actions/docker-build/**", ".github/workflows/test-docker-build.yaml"]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  vars:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: actions/docker-build/test/vars.test.sh
+
+  plain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./actions/docker-build
+        id: build
+        with:
+          # the repository name (.github) is not a valid image name
+          image-name: docker-build-test
+          context: actions/docker-build/test
+          # VERSION must not be overridable, the fixture fails the build if it is
+          build-args: |
+            EXTRA=passed
+            VERSION=overridden
+          push: false
+
+      - name: Check outputs
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          VERSION: ${{ steps.build.outputs.version }}
+          COMMIT: ${{ steps.build.outputs.commit }}
+          TAGS: ${{ steps.build.outputs.tags }}
+        run: |
+          set -x
+          test "$IMAGE" = "ghcr.io/pinax-network/docker-build-test"
+          test "$VERSION" = "develop"
+          test "$COMMIT" = "${GITHUB_SHA::7}"
+          # no moving tags besides develop, which is only set on the default branch
+          expected='^ghcr\.io/pinax-network/docker-build-test:[0-9a-f]{7}-[0-9]+$'
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            test "$(wc -l <<< "$TAGS")" -eq 2
+            test "$(tail -n 1 <<< "$TAGS")" = "ghcr.io/pinax-network/docker-build-test:develop"
+          else
+            test "$(wc -l <<< "$TAGS")" -eq 1
+          fi
+          [[ "$(head -n 1 <<< "$TAGS")" =~ $expected ]]
+
+  ssh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Generate a throwaway SSH key
+        id: key
+        run: |
+          ssh-keygen -q -t ed25519 -N "" -f "$RUNNER_TEMP/key"
+          {
+            echo "private<<EOF_KEY"
+            cat "$RUNNER_TEMP/key"
+            echo "EOF_KEY"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: ./actions/docker-build
+        id: build
+        with:
+          image-name: docker-build-test
+          context: actions/docker-build/test
+          target: ssh
+          tag-suffix: -ssh
+          build-args: EXTRA=passed
+          ssh-key: ${{ steps.key.outputs.private }}
+          push: false
+
+      - name: Check outputs
+        env:
+          TAGS: ${{ steps.build.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            [[ "$tag" == *-ssh ]] || { echo "tag $tag misses the suffix"; exit 1; }
+          done <<< "$TAGS"
+
+      - name: Check that the SSH agent was stopped
+        run: |
+          if compgen -G "$RUNNER_TEMP/ssh-agent.*" > /dev/null || pgrep -x ssh-agent > /dev/null; then
+            echo "the SSH agent is still running after the action finished"
+            exit 1
+          fi
+
+  invalid-image-name:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./actions/docker-build
+        id: build
+        continue-on-error: true
+        with:
+          image-name: ghcr.io/pinax-network/docker-build-test
+          context: actions/docker-build/test
+          push: false
+
+      - name: Check that the build was rejected
+        if: steps.build.outcome != 'failure'
+        run: |
+          echo "an image name with registry and owner must be rejected"
+          exit 1
